@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Nunito', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  h1, h2, h3, .font-comfortaa {
+    font-family: 'Comfortaa', 'Nunito', system-ui, sans-serif;
+  }
+
+  /* High contrast accessible focus outline for keyboard and switch users */
+  button:focus-visible, a:focus-visible, input:focus-visible {
+    outline: 4px solid #F59E0B;
+    outline-offset: 3px;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.25s ease-out forwards;
+}
