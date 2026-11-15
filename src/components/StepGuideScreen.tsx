@@ -230,6 +230,7 @@ export const StepGuideScreen: React.FC<StepGuideScreenProps> = ({
         onClose={() => setIsQuestionModalOpen(false)}
         step={currentStep}
         recipeTitle={recipe.title}
+        totalSteps={totalSteps}
       />
     </main>
   );

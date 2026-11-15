@@ -20,6 +20,7 @@ export interface ChatMessage {
   role: 'user' | 'model';
   text: string;
   timestamp: string;
+  isError?: boolean;
 }
 
 interface QuestionModalProps {
@@ -27,6 +28,7 @@ interface QuestionModalProps {
   onClose: () => void;
   step: RecipeStep;
   recipeTitle: string;
+  totalSteps?: number;
 }
 
 const COMMON_QUICK_QUESTIONS = [
@@ -36,52 +38,21 @@ const COMMON_QUICK_QUESTIONS = [
   { id: 'q4', text: 'Πρέπει να ανακατέψω;' },
 ];
 
-// Smart contextual fallback when network/cookie redirects occur
-function getLocalSmartAnswer(question: string, step: RecipeStep): string {
-  const q = question.toLowerCase();
-  if (
-    q.includes('καίει') ||
-    q.includes('καυτό') ||
-    q.includes('φωτιά') ||
-    q.includes('κάηκα') ||
-    q.includes('κόπηκα') ||
-    q.includes('καπνός') ||
-    q.includes('πονάω')
-  ) {
-    return 'Σβήσε αμέσως το μάτι της κουζίνας και κάνε ένα βήμα πίσω με ασφάλεια.';
-  }
-  if (q.includes('πόση') || q.includes('πόσο') || q.includes('χρόνο') || q.includes('λεπτά') || q.includes('περιμένω')) {
-    if (step.hasTimer && step.timerSeconds) {
-      const minutes = Math.round(step.timerSeconds / 60);
-      return `Περιμένουμε περίπου ${minutes} λεπτά. Παρακολούθησε το χρονόμετρο στην οθόνη σου!`;
-    }
-    return 'Κάνε το βήμα με ηρεμία και χωρίς βιασύνη. Όλα πάνε τέλεια!';
-  }
-  if (q.includes('ανακατεύω') || q.includes('κουτάλα') || q.includes('ανακάτεμα')) {
-    return 'Ανακάτεψε απαλά μία φορά με την ξύλινη κουτάλα και άφησέ το να συνεχίσει.';
-  }
-  if (q.includes('έτοιμο') || q.includes('τελείωσε') || q.includes('έγινε')) {
-    return 'Δοκίμασε προσεκτικά ή κοίταξε αν έχει μαλακώσει, ακριβώς όπως λέει η οδηγία.';
-  }
-  if (q.includes('τι κάνω') || q.includes('ακριβώς') || q.includes('πώς')) {
-    return `${step.instruction} Όλα πάνε περίφημα!`;
-  }
-  return `${step.instruction} Συνέχισε με ηρεμία και προσοχή.`;
-}
-
 export const QuestionModal: React.FC<QuestionModalProps> = ({
   isOpen,
   onClose,
   step,
   recipeTitle,
+  totalSteps,
 }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
-  const [isGeminiConnected, setIsGeminiConnected] = useState(true);
+  const [, setIsGeminiConnected] = useState(true);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
+  const lastContextKeyRef = useRef<string>('');
 
   // Auto-scroll chat thread to bottom on new message
   useEffect(() => {
@@ -90,13 +61,15 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
     }
   }, [messages, isLoading]);
 
-  // Initial welcome message from Gemini assistant when opening for this step
+  // Initial welcome message from Gemini assistant when opening or changing step
   useEffect(() => {
+    const contextKey = `${recipeTitle}::${step.id}`;
     if (isOpen) {
-      if (messages.length === 0) {
+      if (lastContextKeyRef.current !== contextKey || messages.length === 0) {
+        lastContextKeyRef.current = contextKey;
         const welcomeText = `Γεια σου! Είμαι ο Βοηθός σου (Google Gemini). Βρισκόμαστε στο βήμα «${step.title}». Πες μου ή πάτησε μία ερώτηση!`;
         const initialMsg: ChatMessage = {
-          id: 'welcome-msg',
+          id: `welcome-msg-${step.id}`,
           role: 'model',
           text: welcomeText,
           timestamp: new Date().toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' }),
@@ -113,7 +86,7 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
       }
       setIsListening(false);
     }
-  }, [isOpen, step]);
+  }, [isOpen, step, recipeTitle]);
 
   if (!isOpen) return null;
 
@@ -137,10 +110,9 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
     setIsLoading(true);
 
     try {
-      // Send conversation history with context to Gemini endpoint
-      // Filter out local welcome greeting so conversation strictly starts with user
+      // Send genuine conversation history (excluding local welcome & error messages)
       const messagesForGemini = nextHistory
-        .filter((m) => m.id !== 'welcome-msg' && !m.id.startsWith('welcome-'))
+        .filter((m) => !m.id.startsWith('welcome-') && !m.isError)
         .map((m) => ({
           role: m.role,
           text: m.text,
@@ -158,6 +130,7 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
           context: {
             recipeTitle,
             stepNumber: step.id,
+            totalSteps,
             stepTitle: step.title,
             stepInstruction: step.instruction,
           },
@@ -165,17 +138,31 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
       });
 
       const contentType = response.headers.get('content-type') || '';
-      let reply = '';
-
-      if (response.ok && contentType.includes('application/json')) {
-        const data = await response.json();
-        reply = data.answer || getLocalSmartAnswer(textToSend, step);
-        setIsGeminiConnected(data.connected ?? true);
-      } else {
-        // Safe contextual response without crashing on HTML redirect
-        reply = getLocalSmartAnswer(textToSend, step);
-        setIsGeminiConnected(false);
+      if (!contentType.includes('application/json')) {
+        throw new Error('NON_JSON_RESPONSE');
       }
+
+      const data = await response.json();
+
+      if (!response.ok || !data.answer) {
+        const errorText =
+          data.message ||
+          'Ο βοηθός Gemini δεν μπόρεσε να απαντήσει αυτή τη στιγμή. Δοκίμασε ξανά.';
+        setIsGeminiConnected(false);
+        const errorMsg: ChatMessage = {
+          id: `error-${Date.now()}`,
+          role: 'model',
+          text: errorText,
+          timestamp: new Date().toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' }),
+          isError: true,
+        };
+        setMessages((prev) => [...prev, errorMsg]);
+        speakGreek(errorText);
+        return;
+      }
+
+      const reply = String(data.answer).trim();
+      setIsGeminiConnected(data.connected ?? true);
 
       const modelMsg: ChatMessage = {
         id: `model-${Date.now()}`,
@@ -188,17 +175,19 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
 
       // Speak answer automatically via TTS
       speakGreek(reply);
-    } catch {
-      // Graceful fallback without throwing unhandled syntax errors
-      const fallback = getLocalSmartAnswer(textToSend, step);
+    } catch (err) {
+      console.error('Gemini assistant request error:', err);
+      const errorText =
+        'Υπήρξε πρόβλημα επικοινωνίας με τον βοηθό Gemini. Έλεγξε τη σύνδεση και δοκίμασε ξανά.';
       const errorMsg: ChatMessage = {
-        id: `model-${Date.now()}`,
+        id: `error-${Date.now()}`,
         role: 'model',
-        text: fallback,
+        text: errorText,
         timestamp: new Date().toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' }),
+        isError: true,
       };
       setMessages((prev) => [...prev, errorMsg]);
-      speakGreek(fallback);
+      speakGreek(errorText);
       setIsGeminiConnected(false);
     } finally {
       setIsLoading(false);
@@ -208,7 +197,19 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
   const startVoiceInput = () => {
     playClickSound();
     if (!isSpeechRecognitionSupported()) {
-      alert('Η αναγνώριση φωνής δεν υποστηρίζεται σε αυτό το πρόγραμμα περιήγησης. Μπορείς να πατήσεις μία από τις έτοιμες ερωτήσεις!');
+      const noVoiceMsg =
+        'Η αναγνώριση φωνής δεν υποστηρίζεται σε αυτό το πρόγραμμα περιήγησης. Μπορείς να γράψεις ή να πατήσεις μία από τις έτοιμες ερωτήσεις!';
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `info-${Date.now()}`,
+          role: 'model',
+          text: noVoiceMsg,
+          timestamp: new Date().toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' }),
+          isError: true,
+        },
+      ]);
+      speakGreek(noVoiceMsg);
       return;
     }
 
@@ -345,7 +346,9 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
                   className={`max-w-[85%] sm:max-w-[78%] rounded-3xl p-4 sm:p-5 shadow-md space-y-2.5 ${
                     isUser
                       ? 'bg-sky-600 text-white rounded-br-xs'
-                      : 'bg-emerald-50 border-3 border-emerald-300 text-slate-900 rounded-bl-xs'
+                      : msg.isError
+                        ? 'bg-rose-50 border-3 border-rose-300 text-rose-950 rounded-bl-xs'
+                        : 'bg-emerald-50 border-3 border-emerald-300 text-slate-900 rounded-bl-xs'
                   }`}
                 >
                   <p

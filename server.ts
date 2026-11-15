@@ -4,6 +4,21 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import {
+  GEMINI_PRIMARY_MODEL,
+  GEMINI_FALLBACK_MODELS,
+  sanitizeChatHistory,
+  buildCookingSystemInstruction,
+  buildModelConfig,
+  parseGeminiApiError,
+  shouldTryNextGeminiModel,
+} from './server/geminiUtils.ts';
+import type {
+  RawChatMessage,
+  CookingContextInput,
+  GeminiContentTurn,
+  SafeErrorPayload,
+} from './server/geminiUtils.ts';
 
 dotenv.config();
 
@@ -11,11 +26,43 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const GEMINI_MODEL = GEMINI_PRIMARY_MODEL;
 
-app.use(express.json());
+// Short-lived in-memory cache to avoid burning Free Tier quota on repeated identical quick questions
+interface CachedReply {
+  answer: string;
+  model: string;
+  expiresAt: number;
+}
+const replyCache = new Map<string, CachedReply>();
+const CACHE_TTL_MS = 10 * 60 * 1000;
 
-// CORS & Credentials headers for iframe preview compatibility
+function getCachedReply(cacheKey: string): CachedReply | null {
+  const entry = replyCache.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    replyCache.delete(cacheKey);
+    return null;
+  }
+  return entry;
+}
+
+function setCachedReply(cacheKey: string, answer: string, model: string) {
+  if (replyCache.size > 150) {
+    const oldestKey = replyCache.keys().next().value;
+    if (oldestKey) replyCache.delete(oldestKey);
+  }
+  replyCache.set(cacheKey, {
+    answer,
+    model,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+}
+
+app.use(express.json({ limit: '1mb' }));
+
+// CORS & Credentials headers for iframe preview & Cloud Run compatibility
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.header('Access-Control-Allow-Credentials', 'true');
@@ -27,9 +74,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Dynamic client initialization to catch API keys injected or updated at runtime
+// Dynamic client initialization to catch API keys injected at runtime
 function getGeminiClient(): GoogleGenAI | null {
-  const key = process.env.GEMINI_API_KEY;
+  const key = process.env.GEMINI_API_KEY?.trim();
   if (!key) return null;
   return new GoogleGenAI({
     apiKey: key,
@@ -37,167 +84,232 @@ function getGeminiClient(): GoogleGenAI | null {
       headers: {
         'User-Agent': 'aistudio-build',
       },
+      timeout: 20000,
+      retryOptions: {
+        attempts: 1,
+      },
     },
   });
 }
 
+async function generateWithGeminiFallback(
+  ai: GoogleGenAI,
+  contents: GeminiContentTurn[],
+  systemInstruction: string,
+  cacheKey: string
+): Promise<{ answer: string; model: string }> {
+  const cached = getCachedReply(cacheKey);
+  if (cached) {
+    return { answer: cached.answer, model: cached.model };
+  }
+
+  const candidateModels = [GEMINI_PRIMARY_MODEL, ...GEMINI_FALLBACK_MODELS];
+  let lastParsedError: SafeErrorPayload | null = null;
+
+  for (let i = 0; i < candidateModels.length; i++) {
+    const modelName = candidateModels[i];
+    const startMs = Date.now();
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents,
+        config: buildModelConfig(modelName, systemInstruction),
+      });
+
+      const answer = (response.text || '').trim();
+      if (!answer) {
+        lastParsedError = {
+          httpStatus: 502,
+          errorCode: 'GEMINI_EMPTY_RESPONSE',
+          userMessage: 'Ο βοηθός Gemini δεν έστειλε απάντηση. Δοκίμασε να ρωτήσεις ξανά.',
+          diagnosticMessage: `Empty response text from ${modelName}`,
+        };
+        continue;
+      }
+
+      console.log(`[Gemini] ${modelName} responded in ${Date.now() - startMs}ms`);
+      setCachedReply(cacheKey, answer, modelName);
+      return { answer, model: modelName };
+    } catch (error) {
+      const parsed = parseGeminiApiError(error);
+      lastParsedError = parsed;
+      const hasNext = i < candidateModels.length - 1;
+      console.warn(`[Gemini] ${modelName} failed after ${Date.now() - startMs}ms:`, {
+        httpStatus: parsed.httpStatus,
+        errorCode: parsed.errorCode,
+        willFallback: hasNext && shouldTryNextGeminiModel(parsed),
+      });
+
+      if (!hasNext || !shouldTryNextGeminiModel(parsed)) {
+        throw parsed;
+      }
+    }
+  }
+
+  throw lastParsedError ?? {
+    httpStatus: 502,
+    errorCode: 'GEMINI_UPSTREAM_ERROR',
+    userMessage: 'Ο βοηθός Gemini δεν μπόρεσε να απαντήσει αυτή τη στιγμή. Δοκίμασε ξανά σε λίγο.',
+    diagnosticMessage: 'All Gemini candidate models failed.',
+  };
+}
+
+// Health check endpoint (never exposes secrets)
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({
+    ok: true,
+    model: GEMINI_MODEL,
+    geminiConfigured: Boolean(process.env.GEMINI_API_KEY?.trim()),
+  });
+});
+
 // Multi-turn chat endpoint connected to Google Gemini
 app.post('/api/assistant/chat', async (req: Request, res: Response) => {
   try {
-    const { messages, context } = req.body;
     const ai = getGeminiClient();
-
-    // Prepare message history
-    const messageHistory: Array<{ role: string; text: string }> = Array.isArray(messages) ? messages : [];
-    const latestUserMessage = messageHistory[messageHistory.length - 1]?.text || '';
-
-    // Safety checks for dangerous cooking conditions
-    const lowerQuestion = latestUserMessage.toLowerCase();
-    const isDangerous =
-      lowerQuestion.includes('καίει') ||
-      lowerQuestion.includes('καυτό') ||
-      lowerQuestion.includes('φωτιά') ||
-      lowerQuestion.includes('κάηκα') ||
-      lowerQuestion.includes('κόπηκα') ||
-      lowerQuestion.includes('καπνός') ||
-      lowerQuestion.includes('πονάω');
-
-    if (isDangerous) {
-      return res.json({
-        answer: 'Σβήσε αμέσως το μάτι της κουζίνας και κάνε ένα βήμα πίσω με ασφάλεια.',
-        connected: Boolean(ai),
-        model: 'gemini-3.8-flash',
-      });
-    }
-
     if (!ai) {
-      // Deterministic supportive fallback when API key is not yet set
-      let fallback = 'Κάνε ένα πράγμα τη φορά με ηρεμία. Όλα πάνε περίφημα!';
-      if (lowerQuestion.includes('πόση') || lowerQuestion.includes('πόσο') || lowerQuestion.includes('χρόνο')) {
-        fallback = 'Κοίταξε το χρονόμετρο στην οθόνη σου. Περιμένουμε με ηρεμία μέχρι να χτυπήσει το καμπανάκι!';
-      } else if (lowerQuestion.includes('έτοιμο')) {
-        fallback = 'Δοκίμασε προσεκτικά ένα μακαρόνι για να δεις αν είναι μαλακό.';
-      } else if (lowerQuestion.includes('ανακατεύω') || lowerQuestion.includes('κουτάλα')) {
-        fallback = 'Ανακάτεψε απαλά μία φορά με την ξύλινη κουτάλα.';
-      }
-      return res.json({
-        answer: fallback,
+      console.error('[Gemini Chat] Missing GEMINI_API_KEY in server environment.');
+      return res.status(503).json({
+        error: 'MISSING_API_KEY',
+        message: 'Ο βοηθός Google Gemini δεν είναι συνδεδεμένος στον διακομιστή (λείπει το GEMINI_API_KEY).',
         connected: false,
-        model: 'gemini-3.8-flash',
+        model: GEMINI_MODEL,
       });
     }
 
-    const recipeTitle = context?.recipeTitle || 'Μαγειρική';
-    const stepNumber = context?.stepNumber || 1;
-    const totalSteps = context?.totalSteps || 9;
-    const stepTitle = context?.stepTitle || '';
-    const stepInstruction = context?.stepInstruction || '';
+    const body = (req.body || {}) as {
+      messages?: RawChatMessage[];
+      context?: CookingContextInput;
+    };
+    const messageHistory = Array.isArray(body.messages) ? body.messages : [];
+    const contents = sanitizeChatHistory(messageHistory);
 
-    const systemInstruction = `Είσαι ο «Βοηθός Κουζίνας», ένας πολύ υπομονετικός, γλυκός, καθησυχαστικός και βοηθητικός σεφ τεχνητής νοημοσύνης (Google Gemini) για ενήλικες με αυτισμό ή νοητική αναπηρία.
-Βρίσκεστε στη συνταγή: "${recipeTitle}"
-Τρέχον βήμα: Βήμα ${stepNumber} από ${totalSteps} - "${stepTitle}"
-Οδηγία αυτού του βήματος: "${stepInstruction}"
-
-ΚΑΝΟΝΕΣ ΑΠΑΝΤΗΣΗΣ:
-1. Απάντησε πάντα σε ΠΟΛΥ ΑΠΛΑ, ΖΕΣΤΑ και ΚΑΘΑΡΑ ΕΛΛΗΝΙΚΑ.
-2. Οι απαντήσεις σου να είναι 1 έως 2 ΠΟΛΥ ΣΥΝΤΟΜΕΣ προτάσεις.
-3. Το κείμενό σου θα εκφωνηθεί ζωντανά από τη φωνή της εφαρμογής (Text-To-Speech). Μην βάζεις ποτέ αστερίσκους, bullet points, σύμβολα Markdown ή emojis.
-4. Ενθάρρυνε τον χρήστη με θετικότητα, ηρεμία και αυτοπεποίθηση.
-5. Μην αναφέρεις ενήλικες βοηθούς, καθοδήγησε τον ίδιο τον χρήστη να κάνει τη μαγειρική του με ασφάλεια.`;
-
-    // Filter and sanitize message history for Gemini:
-    // 1. Must start with 'user' role
-    // 2. Must alternate roles
-    // 3. Skip local welcome greetings that had role 'model'
-    const sanitizedContents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
-    for (const msg of messageHistory) {
-      if (!msg || !msg.text || typeof msg.text !== 'string') continue;
-      const role = msg.role === 'user' ? 'user' : 'model';
-      // First turn in Gemini conversation must be user
-      if (sanitizedContents.length === 0 && role !== 'user') {
-        continue;
-      }
-      // Ensure alternating roles
-      if (sanitizedContents.length > 0 && sanitizedContents[sanitizedContents.length - 1].role === role) {
-        continue;
-      }
-      sanitizedContents.push({
-        role,
-        parts: [{ text: msg.text }],
+    if (contents.length === 0) {
+      return res.status(400).json({
+        error: 'EMPTY_QUESTION',
+        message: 'Παρακαλώ γράψε ή πες μου την ερώτησή σου.',
+        connected: true,
+        model: GEMINI_MODEL,
       });
     }
 
-    // Fallback if empty
-    if (sanitizedContents.length === 0) {
-      sanitizedContents.push({
-        role: 'user',
-        parts: [{ text: latestUserMessage || 'Τι κάνω σε αυτό το βήμα;' }],
-      });
-    }
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: sanitizedContents,
-      config: {
-        systemInstruction,
-      },
+    const systemInstruction = buildCookingSystemInstruction(body.context);
+    const cacheKey = JSON.stringify({
+      recipe: body.context?.recipeTitle || '',
+      step: body.context?.stepNumber || 1,
+      contents,
     });
 
-    const answer = (response.text || '').trim();
+    const result = await generateWithGeminiFallback(ai, contents, systemInstruction, cacheKey);
 
     return res.json({
-      answer: answer || 'Είμαι εδώ μαζί σου. Συνέχισε το βήμα σου με ηρεμία.',
+      answer: result.answer,
       connected: true,
-      model: 'gemini-3.8-flash',
+      model: result.model,
     });
-  } catch (error) {
-    console.error('Error in Gemini chat:', error);
-    return res.json({
-      answer: 'Μην ανησυχείς. Κάνε το βήμα με ηρεμία και προσοχή.',
+  } catch (err) {
+    const parsed =
+      err && typeof err === 'object' && 'httpStatus' in err && 'errorCode' in err
+        ? (err as SafeErrorPayload)
+        : parseGeminiApiError(err);
+
+    console.warn('[Gemini Chat] Returning error to client:', {
+      httpStatus: parsed.httpStatus,
+      errorCode: parsed.errorCode,
+      diagnostic: parsed.diagnosticMessage,
+    });
+
+    return res.status(parsed.httpStatus).json({
+      error: parsed.errorCode,
+      message: parsed.userMessage,
       connected: false,
-      model: 'gemini-3.8-flash',
+      model: GEMINI_MODEL,
     });
   }
 });
 
-// Single question endpoint (backwards compatibility)
+// Single-turn question endpoint connected to Google Gemini
 app.post('/api/assistant/ask', async (req: Request, res: Response) => {
   try {
-    const { currentStepText, stepTitle, recipeName, userQuestion } = req.body;
     const ai = getGeminiClient();
-
-    const questionText = (userQuestion || '').trim();
-    const systemPrompt = `Είσαι ο «Βοηθός Κουζίνας» (Google Gemini), ένας υπομονετικός οδηγός για ενήλικες με αυτισμό και νοητική αναπηρία.
-Συνταγή: "${recipeName || 'Μαγειρική'}"
-Βήμα: "${stepTitle || ''}" - "${currentStepText || ''}".
-Απάντησε σε πολύ απλά ελληνικά, σε 1-2 μικρές προτάσεις, χωρίς σύμβολα ή emojis.`;
-
     if (!ai) {
-      return res.json({
-        answer: 'Κάνε ένα πράγμα τη φορά με ηρεμία. Όλα πάνε περίφημα!',
+      console.error('[Gemini Ask] Missing GEMINI_API_KEY in server environment.');
+      return res.status(503).json({
+        error: 'MISSING_API_KEY',
+        message: 'Ο βοηθός Google Gemini δεν είναι συνδεδεμένος στον διακομιστή (λείπει το GEMINI_API_KEY).',
         connected: false,
+        model: GEMINI_MODEL,
       });
     }
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: questionText || 'Τι κάνω τώρα;',
-      config: {
-        systemInstruction: systemPrompt,
-      },
+    const body = (req.body || {}) as {
+      currentStepText?: string;
+      stepTitle?: string;
+      recipeName?: string;
+      userQuestion?: string;
+      stepNumber?: number;
+      totalSteps?: number;
+    };
+
+    const questionText = typeof body.userQuestion === 'string' ? body.userQuestion.trim() : '';
+    if (!questionText) {
+      return res.status(400).json({
+        error: 'EMPTY_QUESTION',
+        message: 'Παρακαλώ γράψε ή πες μου την ερώτησή σου.',
+        connected: true,
+        model: GEMINI_MODEL,
+      });
+    }
+
+    const systemInstruction = buildCookingSystemInstruction({
+      recipeTitle: body.recipeName,
+      stepNumber: body.stepNumber,
+      totalSteps: body.totalSteps,
+      stepTitle: body.stepTitle,
+      stepInstruction: body.currentStepText,
     });
 
-    return res.json({
-      answer: (response.text || '').trim() || 'Είμαι εδώ μαζί σου. Κάνε το βήμα σου με ηρεμία.',
-      connected: true,
+    const contents: GeminiContentTurn[] = [{ role: 'user', parts: [{ text: questionText }] }];
+    const cacheKey = JSON.stringify({
+      recipe: body.recipeName || '',
+      step: body.stepNumber || 1,
+      contents,
     });
-  } catch (error) {
-    console.error('Error in ask endpoint:', error);
+
+    const result = await generateWithGeminiFallback(ai, contents, systemInstruction, cacheKey);
+
     return res.json({
-      answer: 'Μην ανησυχείς. Κάνε το βήμα με ηρεμία και προσοχή.',
+      answer: result.answer,
+      connected: true,
+      model: result.model,
+    });
+  } catch (err) {
+    const parsed =
+      err && typeof err === 'object' && 'httpStatus' in err && 'errorCode' in err
+        ? (err as SafeErrorPayload)
+        : parseGeminiApiError(err);
+
+    console.warn('[Gemini Ask] Returning error to client:', {
+      httpStatus: parsed.httpStatus,
+      errorCode: parsed.errorCode,
+      diagnostic: parsed.diagnosticMessage,
+    });
+
+    return res.status(parsed.httpStatus).json({
+      error: parsed.errorCode,
+      message: parsed.userMessage,
       connected: false,
+      model: GEMINI_MODEL,
     });
   }
+});
+
+// Ensure unknown /api/* routes return JSON instead of SPA HTML
+app.all('/api/*', (req: Request, res: Response) => {
+  res.status(404).json({
+    error: 'NOT_FOUND',
+    message: `Η διαδρομή ${req.path} δεν βρέθηκε.`,
+  });
 });
 
 async function startServer() {
@@ -216,8 +328,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server listening on http://0.0.0.0:${PORT} (Gemini configured: ${Boolean(process.env.GEMINI_API_KEY?.trim())})`);
   });
 }
 

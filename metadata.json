@@ -2,5 +2,7 @@
   "name": "Ο Βοηθός μου στην Κουζίνα",
   "description": "Προσβάσιμος οδηγός μαγειρικής βήμα-βήμα στα ελληνικά για ενήλικες με αυτισμό και μαθησιακές δυσκολίες, με μεγάλα κουμπιά, φωνητική καθοδήγηση και έμφαση στην ασφάλεια.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

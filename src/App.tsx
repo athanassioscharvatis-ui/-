@@ -157,6 +157,7 @@ export default function App() {
         onClose={() => setIsGlobalChatOpen(false)}
         step={selectedRecipe.steps[currentStepIndex] || selectedRecipe.steps[0]}
         recipeTitle={selectedRecipe.title}
+        totalSteps={selectedRecipe.steps.length}
       />
     </div>
   );
