@@ -19,6 +19,8 @@ export default function App() {
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
   const [extraLargeText, setExtraLargeText] = useState<boolean>(false);
   const [isGlobalChatOpen, setIsGlobalChatOpen] = useState<boolean>(false);
+  const hasActiveRecipe =
+    currentView === 'ingredients' || currentView === 'guide' || currentView === 'completed';
 
   // Check URL params for ?autostart=1 (supports testing & direct access)
   useEffect(() => {
@@ -155,9 +157,9 @@ export default function App() {
       <QuestionModal
         isOpen={isGlobalChatOpen}
         onClose={() => setIsGlobalChatOpen(false)}
-        step={selectedRecipe.steps[currentStepIndex] || selectedRecipe.steps[0]}
-        recipeTitle={selectedRecipe.title}
-        totalSteps={selectedRecipe.steps.length}
+        step={hasActiveRecipe ? selectedRecipe.steps[currentStepIndex] || selectedRecipe.steps[0] : undefined}
+        recipeTitle={hasActiveRecipe ? selectedRecipe.title : undefined}
+        totalSteps={hasActiveRecipe ? selectedRecipe.steps.length : undefined}
       />
     </div>
   );

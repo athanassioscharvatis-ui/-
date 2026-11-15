@@ -26,8 +26,8 @@ export interface ChatMessage {
 interface QuestionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  step: RecipeStep;
-  recipeTitle: string;
+  step?: RecipeStep;
+  recipeTitle?: string;
   totalSteps?: number;
 }
 
@@ -36,6 +36,13 @@ const COMMON_QUICK_QUESTIONS = [
   { id: 'q2', text: 'Τι κάνω τώρα ακριβώς;' },
   { id: 'q3', text: 'Πώς ξέρω αν είναι έτοιμο;' },
   { id: 'q4', text: 'Πρέπει να ανακατέψω;' },
+];
+
+const GENERAL_QUICK_QUESTIONS = [
+  { id: 'g1', text: 'Τι συνταγές έχουμε σήμερα;' },
+  { id: 'g2', text: 'Ποια συνταγή είναι πιο εύκολη;' },
+  { id: 'g3', text: 'Θέλω κάτι χωρίς φωτιά' },
+  { id: 'g4', text: 'Τι να προσέχω στην κουζίνα;' },
 ];
 
 export const QuestionModal: React.FC<QuestionModalProps> = ({
@@ -61,15 +68,19 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
     }
   }, [messages, isLoading]);
 
-  // Initial welcome message from Gemini assistant when opening or changing step
+  const isRecipeContext = Boolean(recipeTitle && step);
+
+  // Initial welcome message from Gemini assistant when opening or changing step/mode
   useEffect(() => {
-    const contextKey = `${recipeTitle}::${step.id}`;
+    const contextKey = isRecipeContext ? `${recipeTitle}::${step!.id}` : 'general';
     if (isOpen) {
       if (lastContextKeyRef.current !== contextKey || messages.length === 0) {
         lastContextKeyRef.current = contextKey;
-        const welcomeText = `Γεια σου! Είμαι ο Βοηθός σου (Google Gemini). Βρισκόμαστε στο βήμα «${step.title}». Πες μου ή πάτησε μία ερώτηση!`;
+        const welcomeText = isRecipeContext
+          ? `Γεια σου! Είμαι ο Βοηθός σου (Google Gemini). Βρισκόμαστε στο βήμα «${step!.title}». Πες μου ή πάτησε μία ερώτηση!`
+          : 'Γεια σου! Είμαι ο Βοηθός σου (Google Gemini). Διάλεξε όποια συνταγή θέλεις ή ρώτησέ με ό,τι απορία έχεις για την κουζίνα!';
         const initialMsg: ChatMessage = {
-          id: `welcome-msg-${step.id}`,
+          id: `welcome-msg-${isRecipeContext ? step!.id : 'general'}`,
           role: 'model',
           text: welcomeText,
           timestamp: new Date().toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' }),
@@ -127,13 +138,15 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
         },
         body: JSON.stringify({
           messages: messagesForGemini,
-          context: {
-            recipeTitle,
-            stepNumber: step.id,
-            totalSteps,
-            stepTitle: step.title,
-            stepInstruction: step.instruction,
-          },
+          context: isRecipeContext
+            ? {
+                recipeTitle,
+                stepNumber: step!.id,
+                totalSteps,
+                stepTitle: step!.title,
+                stepInstruction: step!.instruction,
+              }
+            : {},
         }),
       });
 
@@ -257,7 +270,9 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
     const initialMsg: ChatMessage = {
       id: `welcome-${Date.now()}`,
       role: 'model',
-      text: `Νέα συζήτηση! Είμαι ο Βοηθός σου Gemini. Τι θα ήθελες να μάθεις για το βήμα «${step.title}»;`,
+      text: isRecipeContext
+        ? `Νέα συζήτηση! Είμαι ο Βοηθός σου Gemini. Τι θα ήθελες να μάθεις για το βήμα «${step!.title}»;`
+        : 'Νέα συζήτηση! Είμαι ο Βοηθός σου Gemini. Τι θα ήθελες να φτιάξουμε ή να με ρωτήσεις;',
       timestamp: new Date().toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' }),
     };
     setMessages([initialMsg]);
@@ -295,7 +310,7 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
                 </span>
               </div>
               <p className="text-xs sm:text-sm font-extrabold text-amber-800 mt-0.5">
-                Συνταγή: {recipeTitle} • Βήμα {step.id}
+                {isRecipeContext ? `Συνταγή: ${recipeTitle} • Βήμα ${step!.id}` : 'Γενικός Βοηθός Κουζίνας'}
               </p>
             </div>
           </div>
@@ -410,7 +425,7 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
             <Zap className="w-3.5 h-3.5 text-amber-600" />
             <span>Γρήγορες ερωτήσεις:</span>
           </span>
-          {COMMON_QUICK_QUESTIONS.map((q) => (
+          {(isRecipeContext ? COMMON_QUICK_QUESTIONS : GENERAL_QUICK_QUESTIONS).map((q) => (
             <button
               key={q.id}
               onClick={() => handleSendMessage(q.text)}

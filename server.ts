@@ -209,8 +209,8 @@ app.post('/api/assistant/chat', async (req: Request, res: Response) => {
 
     const systemInstruction = buildCookingSystemInstruction(body.context);
     const cacheKey = JSON.stringify({
-      recipe: body.context?.recipeTitle || '',
-      step: body.context?.stepNumber || 1,
+      recipe: body.context?.recipeTitle || '__general__',
+      step: body.context?.recipeTitle ? body.context?.stepNumber || 1 : 0,
       contents,
     });
 
@@ -285,8 +285,8 @@ app.post('/api/assistant/ask', async (req: Request, res: Response) => {
 
     const contents: GeminiContentTurn[] = [{ role: 'user', parts: [{ text: questionText }] }];
     const cacheKey = JSON.stringify({
-      recipe: body.recipeName || '',
-      step: body.stepNumber || 1,
+      recipe: body.recipeName || '__general__',
+      step: body.recipeName ? body.stepNumber || 1 : 0,
       contents,
     });
 

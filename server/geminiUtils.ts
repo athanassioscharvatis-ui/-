@@ -86,16 +86,22 @@ export function sanitizeChatHistory(
  * Builds the Greek cognitive-accessibility system instruction for Gemini.
  */
 export function buildCookingSystemInstruction(context: CookingContextInput = {}): string {
-  const recipeTitle = context.recipeTitle || 'Μαγειρική';
-  const stepNumber = context.stepNumber || 1;
-  const totalSteps = context.totalSteps || 9;
-  const stepTitle = context.stepTitle || '';
-  const stepInstruction = context.stepInstruction || '';
+  const recipeTitle = typeof context.recipeTitle === 'string' ? context.recipeTitle.trim() : '';
+  const hasRecipeContext = Boolean(recipeTitle);
+
+  const contextSection = hasRecipeContext
+    ? `Βρίσκεστε στη συνταγή: "${recipeTitle}"
+Τρέχον βήμα: Βήμα ${context.stepNumber || 1} από ${context.totalSteps || 9}${context.stepTitle ? ` - "${context.stepTitle}"` : ''}
+${context.stepInstruction ? `Οδηγία αυτού του βήματος: "${context.stepInstruction}"` : ''}`
+    : `Ο χρήστης βρίσκεται στην αρχική οθόνη ή στην επιλογή συνταγών και ΔΕΝ έχει ξεκινήσει ακόμα κάποια συγκεκριμένη συνταγή.
+Διαθέσιμες συνταγές της εφαρμογής:
+- "Μακαρόνια με Σάλτσα Ντομάτας" (20 λεπτά, με μάτι κουζίνας)
+- "Ζεστό Τοστ με Τυρί & Γαλοπούλα" (7 λεπτά, στην τοστιέρα)
+- "Δροσερή Φρουτοσαλάτα" (10 λεπτά, χωρίς φωτιά / χωρίς μαγείρεμα)
+ΜΗΝ υποθέτεις ότι φτιάχνει μακαρόνια αν δεν το ζητήσει. Βοήθησέ τον φιλικά σε ό,τι ρωτήσει ή πρότεινέ του απλά μία από τις συνταγές αν σου ζητήσει ιδέα.`;
 
   return `Είσαι ο «Βοηθός Κουζίνας», ένας πολύ υπομονετικός, γλυκός, καθησυχαστικός και βοηθητικός σεφ τεχνητής νοημοσύνης (Google Gemini) για ενήλικες με αυτισμό ή νοητική αναπηρία.
-Βρίσκεστε στη συνταγή: "${recipeTitle}"
-Τρέχον βήμα: Βήμα ${stepNumber} από ${totalSteps}${stepTitle ? ` - "${stepTitle}"` : ''}
-${stepInstruction ? `Οδηγία αυτού του βήματος: "${stepInstruction}"` : ''}
+${contextSection}
 
 ΚΑΝΟΝΕΣ ΑΠΑΝΤΗΣΗΣ:
 1. Απάντησε πάντα σε ΠΟΛΥ ΑΠΛΑ, ΖΕΣΤΑ και ΚΑΘΑΡΑ ΕΛΛΗΝΙΚΑ.

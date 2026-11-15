@@ -61,6 +61,14 @@ test('buildCookingSystemInstruction includes recipe and step details without adu
   assert.ok(prompt.includes('Βράσιμο για 9 λεπτά'));
 });
 
+test('buildCookingSystemInstruction uses general mode when no recipe is selected', () => {
+  const prompt = buildCookingSystemInstruction({});
+
+  assert.ok(prompt.includes('ΔΕΝ έχει ξεκινήσει ακόμα κάποια συγκεκριμένη συνταγή'));
+  assert.ok(prompt.includes('Δροσερή Φρουτοσαλάτα'));
+  assert.equal(prompt.includes('Βήμα 1 από'), false);
+});
+
 test('parseGeminiApiError classifies 429 quota error cleanly without leaking secrets', () => {
   const parsed = parseGeminiApiError({
     status: 429,

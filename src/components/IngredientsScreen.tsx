@@ -3,6 +3,7 @@ import { Check, ArrowRight, ArrowLeft, Volume2, Sparkles, CheckCircle2 } from 'l
 import { Recipe, Ingredient } from '../types/recipe';
 import { playClickSound, playSuccessSound } from '../utils/sound';
 import { speakGreek } from '../utils/speech';
+import { INGREDIENT_IMAGES } from '../utils/ingredientImages';
 
 interface IngredientsScreenProps {
   recipe: Recipe;
@@ -154,26 +155,41 @@ export const IngredientsScreen: React.FC<IngredientsScreenProps> = ({
               }`}
             >
               <div className="flex items-start justify-between gap-3 mb-3">
-                {/* Visual Icon Illustration */}
-                <div
-                  className={`w-16 h-16 rounded-2xl flex items-center justify-center text-3xl shadow-inner ${
-                    isChecked ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
-                  }`}
-                >
-                  {ing.iconName === 'pasta' && '🍝'}
-                  {ing.iconName === 'sauce' && '🥫'}
-                  {ing.iconName === 'water' && '🚰'}
-                  {ing.iconName === 'salt' && '🧂'}
-                  {ing.iconName === 'oil' && '🫒'}
-                  {ing.iconName === 'cheese' && '🧀'}
-                  {ing.iconName === 'bread' && '🍞'}
-                  {ing.iconName === 'meat' && '🥪'}
-                  {ing.iconName === 'butter' && '🧈'}
-                  {ing.iconName === 'banana' && '🍌'}
-                  {ing.iconName === 'apple' && '🍎'}
-                  {ing.iconName === 'honey' && '🍯'}
-                  {ing.iconName === 'spice' && '✨'}
-                </div>
+                {/* Real Ingredient Photo */}
+                {INGREDIENT_IMAGES[ing.id] ? (
+                  <div
+                    className={`w-20 h-20 rounded-2xl overflow-hidden shadow-md border-2 shrink-0 ${
+                      isChecked ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-amber-200'
+                    }`}
+                  >
+                    <img
+                      src={INGREDIENT_IMAGES[ing.id]}
+                      alt={ing.name}
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                ) : (
+                  <div
+                    className={`w-16 h-16 rounded-2xl flex items-center justify-center text-3xl shadow-inner ${
+                      isChecked ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                    }`}
+                  >
+                    {ing.iconName === 'pasta' && '🍝'}
+                    {ing.iconName === 'sauce' && '🥫'}
+                    {ing.iconName === 'water' && '🚰'}
+                    {ing.iconName === 'salt' && '🧂'}
+                    {ing.iconName === 'oil' && '🫒'}
+                    {ing.iconName === 'cheese' && '🧀'}
+                    {ing.iconName === 'bread' && '🍞'}
+                    {ing.iconName === 'meat' && '🥪'}
+                    {ing.iconName === 'butter' && '🧈'}
+                    {ing.iconName === 'banana' && '🍌'}
+                    {ing.iconName === 'apple' && '🍎'}
+                    {ing.iconName === 'honey' && '🍯'}
+                    {ing.iconName === 'spice' && '✨'}
+                  </div>
+                )}
 
                 {/* Big Accessible Checkbox */}
                 <div
