@@ -12,6 +12,7 @@ import {
   buildModelConfig,
   parseGeminiApiError,
   shouldTryNextGeminiModel,
+  selectCandidateModels,
 } from './server/geminiUtils.ts';
 import type {
   RawChatMessage,
@@ -37,6 +38,9 @@ interface CachedReply {
 }
 const replyCache = new Map<string, CachedReply>();
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const modelCooldowns = new Map<string, number>();
+const QUOTA_COOLDOWN_MS = 15 * 60 * 1000;
+const TIMEOUT_COOLDOWN_MS = 2 * 60 * 1000;
 
 function getCachedReply(cacheKey: string): CachedReply | null {
   const entry = replyCache.get(cacheKey);
@@ -84,7 +88,7 @@ function getGeminiClient(): GoogleGenAI | null {
       headers: {
         'User-Agent': 'aistudio-build',
       },
-      timeout: 20000,
+      timeout: 25000,
       retryOptions: {
         attempts: 1,
       },
@@ -103,7 +107,10 @@ async function generateWithGeminiFallback(
     return { answer: cached.answer, model: cached.model };
   }
 
-  const candidateModels = [GEMINI_PRIMARY_MODEL, ...GEMINI_FALLBACK_MODELS];
+  const candidateModels = selectCandidateModels(
+    [GEMINI_PRIMARY_MODEL, ...GEMINI_FALLBACK_MODELS],
+    modelCooldowns
+  );
   let lastParsedError: SafeErrorPayload | null = null;
 
   for (let i = 0; i < candidateModels.length; i++) {
@@ -127,22 +134,29 @@ async function generateWithGeminiFallback(
         continue;
       }
 
+      modelCooldowns.delete(modelName);
       console.log(`[Gemini] ${modelName} responded in ${Date.now() - startMs}ms`);
       setCachedReply(cacheKey, answer, modelName);
       return { answer, model: modelName };
     } catch (error) {
       const parsed = parseGeminiApiError(error);
       lastParsedError = parsed;
-      const hasNext = i < candidateModels.length - 1;
-      console.warn(`[Gemini] ${modelName} failed after ${Date.now() - startMs}ms:`, {
-        httpStatus: parsed.httpStatus,
-        errorCode: parsed.errorCode,
-        willFallback: hasNext && shouldTryNextGeminiModel(parsed),
-      });
 
-      if (!hasNext || !shouldTryNextGeminiModel(parsed)) {
-        throw parsed;
+      if (parsed.errorCode === 'GEMINI_QUOTA_EXCEEDED') {
+        modelCooldowns.set(modelName, Date.now() + QUOTA_COOLDOWN_MS);
+      } else if (parsed.errorCode === 'GEMINI_TIMEOUT') {
+        modelCooldowns.set(modelName, Date.now() + TIMEOUT_COOLDOWN_MS);
       }
+
+      const hasNext = i < candidateModels.length - 1;
+      if (hasNext && shouldTryNextGeminiModel(parsed)) {
+        console.info(
+          `[Gemini] Switching from ${modelName} to ${candidateModels[i + 1]} (${parsed.httpStatus}, ${Date.now() - startMs}ms)`
+        );
+        continue;
+      }
+
+      throw parsed;
     }
   }
 

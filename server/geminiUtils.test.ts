@@ -6,6 +6,7 @@ import {
   parseGeminiApiError,
   buildModelConfig,
   shouldTryNextGeminiModel,
+  selectCandidateModels,
 } from './geminiUtils';
 
 test('sanitizeChatHistory skips leading model welcome messages and error bubbles', () => {
@@ -97,4 +98,20 @@ test('buildModelConfig applies appropriate thinkingLevel per model', () => {
 
   const generic = buildModelConfig('custom-model', 'sys');
   assert.equal('thinkingConfig' in generic, false);
+});
+
+test('selectCandidateModels deprioritizes models in active cooldown while keeping them as fallback', () => {
+  const now = 10000;
+  const cooldowns = new Map<string, number>([
+    ['gemini-3.8-flash', now + 60000],
+    ['gemini-3.1-flash-lite', now - 1000],
+  ]);
+
+  const ordered = selectCandidateModels(
+    ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
+    cooldowns,
+    now
+  );
+
+  assert.deepEqual(ordered, ['gemini-3.1-flash-lite', 'gemini-4-hydrogen', 'gemini-3.8-flash']);
 });

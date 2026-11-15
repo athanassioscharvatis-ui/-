@@ -230,3 +230,27 @@ export function shouldTryNextGeminiModel(parsed: SafeErrorPayload): boolean {
     parsed.errorCode === 'GEMINI_UPSTREAM_ERROR'
   );
 }
+
+/**
+ * Orders candidate models by putting non-cooled-down models first,
+ * followed by cooled-down models so we never fail without attempting live Gemini.
+ */
+export function selectCandidateModels(
+  models: readonly string[],
+  cooldowns: ReadonlyMap<string, number>,
+  now: number = Date.now()
+): string[] {
+  const ready: string[] = [];
+  const cooledDown: string[] = [];
+
+  for (const model of models) {
+    const until = cooldowns.get(model) ?? 0;
+    if (until > now) {
+      cooledDown.push(model);
+    } else {
+      ready.push(model);
+    }
+  }
+
+  return [...ready, ...cooledDown];
+}

@@ -223,8 +223,8 @@ export const QuestionModal: React.FC<QuestionModalProps> = ({
     if (!recognizer) return;
     recognitionRef.current = recognizer;
 
+    stopSpeaking();
     setIsListening(true);
-    speakGreek('Σε ακούω. Πες μου τι θέλεις.');
 
     recognizer.onresult = (event: any) => {
       const transcript = event.results?.[0]?.[0]?.transcript || '';
